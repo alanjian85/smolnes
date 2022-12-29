@@ -1,5 +1,19 @@
-#include <SDL2/SDL.h>
 #include <stdint.h>
+#include <stddef.h>
+#include <stdio.h>
+#include <stdlib.h>
+
+#define INDEX_RIGHT 0
+#define INDEX_LEFT 1 
+#define INDEX_DOWN 2
+#define INDEX_UP 3
+#define INDEX_RETURN 4
+#define INDEX_TAB 5 
+#define INDEX_Z 6
+#define INDEX_X 7
+
+#define SCREEN_WIDTH 256
+#define SCREEN_HEIGHT 240
 
 #define PULL mem(++S, 1, 0, 0)
 #define PUSH(x) mem(S--, 1, x, 1);
@@ -9,15 +23,79 @@
   case x:                                                                      \
   case x + 16:
 
+enum {
+    KEY_EVENT = 0,
+    MOUSE_MOTION_EVENT = 1,
+    MOUSE_BUTTON_EVENT = 2
+};
+
+typedef struct {
+    uint32_t keycode;
+    uint8_t state;
+} key_event_t;
+
+typedef struct {
+    int32_t xrel, yrel;
+} mouse_motion_t;
+
+typedef struct {
+    uint8_t button;
+    uint8_t state;
+} mouse_button_t;
+
+typedef struct {
+    uint32_t type;
+    union {
+        key_event_t key_event;
+        union {
+            mouse_motion_t motion;
+            mouse_button_t button;
+        } mouse;
+    };
+} event_t;
+
+typedef struct {
+    event_t *base;
+    size_t start;
+    size_t capacity;
+} event_queue_t;
+
+event_queue_t event_queue = {
+    .base = NULL,
+    .start = 0,
+    .capacity = 0
+};
+
+enum {
+    RELATIVE_MODE_SUBMISSION = 0
+};
+
+typedef struct {
+    uint32_t type;
+    union {
+        union {
+            uint8_t enabled;
+        } mouse;
+    };
+} submission_t;
+
+size_t event_count;
+
 // BGR565 palette. Used instead of RGBA32 to reduce source code size.
-int rgba[64] = {25356, 34816, 39011, 30854, 24714, 4107,  106,   2311,  2468,
-                2561,  4642,  6592,  20832, 0,     0,     0,     44373, 49761,
-                55593, 51341, 43186, 18675, 434,   654,   4939,  5058,  3074,
-                19362, 37667, 0,     0,     0,     ~0,    ~819,  64497, 64342,
-                62331, 43932, 23612, 9465,  1429,  1550,  20075, 36358, 52713,
-                16904, 0,     0,     ~0,    ~328,  ~422,  ~452,  ~482,  58911,
-                50814, 42620, 40667, 40729, 48951, 53078, 61238, 44405},
-    scany,    // Scanline Y
+uint32_t rgba[64] = {
+    0xFF5C5C5C, 0xFF002267, 0xFF131280, 0xFF2E067E, 0xFF460060, 0xFF530231,
+    0xFF510A02, 0xFF411900, 0xFF282900, 0xFF0D3700, 0xFF003E00, 0xFF003C0A,
+    0xFF00313B, 0xFF000000, 0xFF000000, 0xFF000000, 0xFFA7A7A7, 0xFF1E55b7,
+    0xFF3F3DDA, 0xFF662BD6, 0xFF8822AC, 0xFF9A246B, 0xFF983225, 0xFF814700,
+    0xFF5D5F00, 0xFF367300, 0xFF187D00, 0xFF097A32, 0xFF0B6B79, 0xFF000000,
+    0xFF000000, 0xFF000000, 0xFFFEFFFF, 0xFF6AA7FF, 0xFF8F8DFF, 0xFFB979FF,
+    0xFFDD6FFF, 0xFFF172BE, 0xFFEE8173, 0xFFD69837, 0xFFB0B218, 0xFF86C71C,
+    0xFF64D141, 0xFF52CE81, 0xFF54BECD, 0xFF454545, 0xFF000000, 0xFF000000,
+    0xFFFEFFFF, 0xFFC0DAFF, 0xFFD0CFFF, 0xFFE2C6FF, 0xFFF1C2FF, 0xFFF9C3E4,
+    0xFFF8CAC4, 0xFFEED4A9, 0xFFDEDF9B, 0xFFCCE79D, 0xFFBDECAE, 0xFFB5EACA,
+    0xFFB6E4EA, 0xFFB0B0B0, 0xFF000000, 0xFF000000
+};
+int scany,    // Scanline Y
     shift_at; // Attribute shift register
 
 uint8_t *rom, *chrrom,                // Points to the start of PRG/CHR ROM
@@ -51,16 +129,50 @@ uint8_t *rom, *chrrom,                // Points to the start of PRG/CHR ROM
     mmc1_bits, mmc1_data, mmc1_ctrl,   // Mapper 1 (MMC1) registers
     chrbank0, chrbank1, prgbank,       // Current PRG/CHR bank
     rombuf[1024 * 1024],               // Buffer to read ROM file into
-    *key_state;
+    key_state[8];
 
 uint16_t T, V,           // "Loopy" PPU registers
     sum,                 // Sum used for ADC/SBC
     dot,                 // Horizontal position of PPU, from 0..340
     atb,                 // Attribute byte
     shift_hi, shift_lo,  // Pattern table shift registers
-    cycles,              // Cycle count for current instruction
-    frame_buffer[61440]; // 256x240 pixel frame buffer. Top and bottom 8 rows
-                         // are not drawn.
+    cycles;              // Cycle count for current instruction
+
+uint32_t frame_buffer[61440]; // 256x240 pixel frame buffer. Top and bottom 8 rows
+                              // are not drawn.
+
+void draw_frame(void *base, int width, int height) {
+    register void* a0 asm("a0") = base;
+    register int a1 asm("a1") = width;
+    register int a2 asm("a2") = height;
+    register size_t a7 asm("a7") = 0xbeef;
+    asm volatile ("scall" : : "r"(a0), "r"(a1), "r"(a2), "r"(a7));
+}
+
+void setup_queue(void* base, size_t capacity) {
+    register void* a0 asm("a0") = base;
+    register size_t a1 asm("a1") = capacity;
+    register size_t* a2 asm("a2") = &event_count;
+    register size_t a7 asm("a7") = 0xc0de;
+    asm volatile ("scall" : : "r"(a0), "r"(a1), "r"(a2), "r"(a7));
+    
+    event_queue.base = base;
+    event_queue.capacity = capacity;
+
+    // Ignore the subsequent submission queue
+}
+
+int poll_event(event_t* event) {
+    if (event_count == 0)
+        return 0;
+
+    *event = event_queue.base[event_queue.start];
+    ++event_queue.start;
+    event_queue.start &= event_queue.capacity - 1;
+    --event_count;
+
+    return 1;
+}
 
 // Read a byte from CHR ROM or CHR RAM.
 uint8_t *get_chr_byte(uint16_t a) {
@@ -133,15 +245,15 @@ uint8_t mem(uint8_t lo, uint8_t hi, uint8_t val, uint8_t write) {
       for (sum = 256; sum--;)
         oam[sum] = mem(sum, val, 0, 0);
     // $4016 Joypad 1
-    return (lo == 22) ? write ? keys = (key_state[SDL_SCANCODE_RIGHT] * 8 +
-                                        key_state[SDL_SCANCODE_LEFT] * 4 +
-                                        key_state[SDL_SCANCODE_DOWN] * 2 +
-                                        key_state[SDL_SCANCODE_UP]) *
+    return (lo == 22) ? write ? keys = (key_state[INDEX_RIGHT] * 8 +
+                                        key_state[INDEX_LEFT] * 4 +
+                                        key_state[INDEX_DOWN] * 2 +
+                                        key_state[INDEX_UP]) *
                                            16 +
-                                       key_state[SDL_SCANCODE_RETURN] * 8 +
-                                       key_state[SDL_SCANCODE_TAB] * 4 +
-                                       key_state[SDL_SCANCODE_Z] * 2 +
-                                       key_state[SDL_SCANCODE_X]
+                                       key_state[INDEX_RETURN] * 8 +
+                                       key_state[INDEX_TAB] * 4 +
+                                       key_state[INDEX_Z] * 2 +
+                                       key_state[INDEX_X]
                               : (tmp = keys & 1, keys /= 2, tmp)
                       : 0;
 
@@ -204,7 +316,12 @@ uint8_t read_pc() {
 uint8_t set_nz(uint8_t val) { return P = P & ~130 | val & 128 | !val * 2; }
 
 int main(int argc, char **argv) {
-  SDL_RWread(SDL_RWFromFile(argv[1], "rb"), rombuf, 1024 * 1024, 1);
+  FILE *file = fopen("mario.nes", "rb");
+  fread(rombuf, 1024 * 1024, 1, file);
+
+  void* base = malloc(sizeof(event_t) * 128 + sizeof(submission_t) * 128);
+  setup_queue(base, 128);
+
   // Start PRG0 after 16-byte header.
   rom = rombuf + 16;
   // PRG1 is the last bank. `rombuf[4]` is the number of 16k PRG banks.
@@ -220,17 +337,6 @@ int main(int argc, char **argv) {
   // Start at address in reset vector, at $FFFC.
   PCL = mem(~3, ~0, 0, 0);
   PCH = mem(~2, ~0, 0, 0);
-
-  SDL_Init(SDL_INIT_VIDEO);
-  // Create window 1024x840. The framebuffer is 256x240, but we don't draw the
-  // top or bottom 8 rows. Scaling up by 4x gives 1024x960, but that looks
-  // squished because the NES doesn't have square pixels. So shrink it by 7/8.
-  void *renderer = SDL_CreateRenderer(
-      SDL_CreateWindow("smolnes", 0, 0, 1024, 840, SDL_WINDOW_SHOWN), -1,
-      SDL_RENDERER_PRESENTVSYNC);
-  void *texture = SDL_CreateTexture(renderer, SDL_PIXELFORMAT_BGR565,
-                                    SDL_TEXTUREACCESS_STREAMING, 256, 224);
-  key_state = (uint8_t*)SDL_GetKeyboardState(0);
 
   for (;;) {
     cycles = nomem = 0;
@@ -628,13 +734,41 @@ int main(int argc, char **argv) {
         ppustatus |= 128;
         // Render frame, skipping the top and bottom 8 pixels (they're often
         // garbage).
-        SDL_UpdateTexture(texture, 0, frame_buffer + 2048, 512);
-        SDL_RenderCopy(renderer, texture, 0, 0);
-        SDL_RenderPresent(renderer);
-        // Handle SDL events.
-        for (SDL_Event event; SDL_PollEvent(&event);)
-          if (event.type == SDL_QUIT)
-            return 0;
+        draw_frame(frame_buffer + 4096, 256, 224);
+        // Handle events.
+        for (event_t event; poll_event(&event);)
+            switch (event.type) {
+                case KEY_EVENT: {
+                    uint8_t state = event.key_event.state;
+                    switch (event.key_event.keycode) {
+                        case 0x4000004F:
+                            key_state[INDEX_RIGHT] = state;
+                            break;
+                        case 0x40000050:
+                            key_state[INDEX_LEFT] = state;
+                            break;
+                        case 0x40000051:
+                            key_state[INDEX_DOWN] = state;
+                            break;
+                        case 0x40000052:
+                            key_state[INDEX_UP] = state;
+                            break;
+                        case '\xd':
+                            key_state[INDEX_RETURN] = state;
+                            break;
+                        case '\t':
+                            key_state[INDEX_TAB] = state;
+                            break;
+                        case 'z':
+                            key_state[INDEX_Z] = state;
+                            break;
+                        case 'x':
+                            key_state[INDEX_X] = state;
+                            break;
+                    }
+                    break;
+                }
+            }
       }
 
       // Clear ppustatus.

@@ -13,7 +13,7 @@ smolnes: smolnes.c
 	$(CC) -O2 -o $@ $< -lSDL2 -g ${WARN}
 
 deobfuscated: deobfuscated.c
-	$(CC) -O2 -o $@ $< -lSDL2 -g ${WARN}
+	$(CC) -O3 -o $@ $< -g ${WARN} -march=rv32i -mabi=ilp32
 
 clean:
 	rm -f smolnes deobfuscated
