@@ -2,6 +2,7 @@
 #include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <assert.h>
 
 #define INDEX_RIGHT 0
 #define INDEX_LEFT 1 
@@ -316,8 +317,15 @@ uint8_t read_pc() {
 uint8_t set_nz(uint8_t val) { return P = P & ~130 | val & 128 | !val * 2; }
 
 int main(int argc, char **argv) {
-  FILE *file = fopen("mario.nes", "rb");
+  FILE *file = NULL;
+  if (argc == 2)
+    file = fopen(argv[1], "rb");
+  if (!file) {
+      file = fopen("falling.nes", "rb");
+      assert(file && "fallback ROM file \"falling.nes\" not found!");
+  }
   fread(rombuf, 1024 * 1024, 1, file);
+  fclose(file);
 
   void* base = malloc(sizeof(event_t) * 128 + sizeof(submission_t) * 128);
   setup_queue(base, 128);
